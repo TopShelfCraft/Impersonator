@@ -94,4 +94,5 @@ If you've found a bug, or have a question, please open a [GitHub Issue](https://
 
 ### Contributors:
 
-  - Plugin development: [Michael Rog](https://michaelrog.com) / @michaelrog
+  - Plugin development: [Michael Rog](https://michaelrog.com) / @michaelrog 
+  - "Disguise" icon: [Adrien Coquet](https://www.behance.net/coquet_adrien), via [The Noun Project](https://thenounproject.com/icon/disguise-4237095/)

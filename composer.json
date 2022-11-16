@@ -2,7 +2,7 @@
     "name": "topshelfcraft/impersonator",
     "description": "Who do you want to be?",
     "type": "craft-plugin",
-    "version": "3.0.0",
+    "version": "4.0.0",
     "keywords": [
         "craft",
         "cms",
@@ -11,7 +11,8 @@
         "impersonator"
     ],
     "support": {
-        "email": "support@topshelfcraft.com"
+        "docs": "https://github.com/TopShelfCraft/Impersonator",
+        "issues": "https://github.com/TopShelfCraft/Impersonator/issues"
     },
     "license": "proprietary",
     "authors": [
@@ -21,23 +22,16 @@
         }
     ],
     "require": {
-        "craftcms/cms": "^3.0"
+        "craftcms/cms": "^4.0"
     },
     "autoload": {
         "psr-4": {
-          "topshelfcraft\\impersonator\\": "src/"
+          "TopShelfCraft\\Impersonator\\": "src/"
         }
     },
     "extra": {
         "name": "Impersonator",
         "handle": "impersonator",
-        "schemaVersion": "0.0.0.0",
-        "hasCpSettings": false,
-        "hasCpSection": false,
-        "changelogUrl": "",
-        "components": {
-            "impersonator": "topshelfcraft\\impersonator\\services\\Impersonator"
-        },
-        "class": "topshelfcraft\\impersonator\\Impersonator"
+        "class": "TopShelfCraft\\Impersonator\\Impersonator"
     }
 }

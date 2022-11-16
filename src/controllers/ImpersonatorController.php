@@ -1,133 +1,115 @@
 <?php
-namespace topshelfcraft\impersonator\controllers;
+namespace TopShelfCraft\Impersonator\controllers;
 
 use Craft;
+use craft\controllers\UsersController;
 use craft\elements\User;
+use craft\helpers\ConfigHelper;
+use craft\helpers\DateTimeHelper;
+use craft\helpers\Session;
 use craft\web\Controller;
-use topshelfcraft\impersonator\Impersonator;
-use yii\base\InvalidConfigException;
+use TopShelfCraft\Impersonator\Impersonator;
 use yii\web\BadRequestHttpException;
 use yii\web\Cookie;
 use yii\web\ForbiddenHttpException;
 use yii\web\Response;
 
-/**
- * @author    Top Shelf Craft (Michael Rog)
- * @package   Impersonator
- * @since     1.0.0
- */
 class ImpersonatorController extends Controller
 {
 
-    // Protected Properties
-    // =========================================================================
+	public $enableCsrfValidation = false;
 
-    /**
-     * @var    bool|array Controller actions that can be used anonymously
-	 *
-     * @access protected
-     */
-    protected $allowAnonymous = ['unimpersonate'];
-
-    public $enableCsrfValidation = false;
-
-
-    // Public Methods
-    // =========================================================================
+    protected int|bool|array $allowAnonymous = [
+		'unimpersonate',
+	];
 
 	/**
-	 * @return Response|null
+	 * Starts an impersonation session, using the username, email, or ID of the user to be impersonated.
 	 *
-	 * @throws BadRequestHttpException
-	 * @throws ForbiddenHttpException
-	 * @throws InvalidConfigException
+	 * @throws BadRequestHttpException if no user can be found using the given criterion.
+	 * @throws ForbiddenHttpException if the user doesn't have permission to perform the impersonation.
 	 */
-	public function actionImpersonate()
+	public function actionImpersonate(): ?Response
 	{
 
 		$this->requirePostRequest();
-		$this->requireLogin();
 
-		$request = Craft::$app->getRequest();
-		$session = Craft::$app->getSession();
-		$users = Craft::$app->getUsers();
 		$userSession = Craft::$app->getUser();
+		$settings = Impersonator::getInstance()->getSettings();
 
-		// Try to identify the User to be impersonated
+		/*
+		 * Identify the user to be impersonated
+		 */
 
-		$criterion = $request->getBodyParam(Impersonator::$plugin->getSettings()->accountParamName);
+		$criterion = $this->request->getRequiredBodyParam($settings->accountParamName);
 
-		$impersonatee = $users->getUserByUsernameOrEmail($criterion);
+		$impersonatee = Craft::$app->users->getUserByUsernameOrEmail($criterion)
+			?? Craft::$app->users->getUserById($criterion);
+
 		if (!$impersonatee)
 		{
-			$impersonatee = $users->getUserById($criterion);
-		}
-		if (!$impersonatee)
-		{
-			throw new BadRequestHttpException("Cannot find a User by the given criteria.");
+			// TODO: Are we worried about revealing that the user doesn't exist, as a disclosure vector?
+			throw new BadRequestHttpException("Invalid user: $criterion");
 		}
 
-		// Make sure you're allowed to impersonate this user
-
-		$canImpersonate = $users->canImpersonate($userSession->getIdentity(), $impersonatee);
-		if (!$canImpersonate) {
-			throw new ForbiddenHttpException(Craft::t('app', '\'You do not have sufficient permissions to impersonate this user'));
-		}
+		/*
+		 * Make sure they're allowed to impersonate this user
+		 */
+		$this->_enforceImpersonatePermission($impersonatee);
 
 		/*
 		 * Save the original (impersonator) user ID to the session now so User::findIdentity()
 		 * knows not to worry if the impersonated User isn't active yet,
 		 * and so we can verify the impersonator's identity before restoring it later.
 		 */
-		$session->set(User::IMPERSONATE_KEY, $userSession->getId());
+		Session::set(User::IMPERSONATE_KEY, $userSession->getId());
 
-		// Attempt to copy the impersonator's Identity, so we can back them out of impersonation mode later.
+		/*
+		 * Attempt to copy the current impersonator's Identity cookie,
+		 * so we restore it later to back them out of impersonation mode.
+		 */
 
-		$identityCookie = $request->getCookies()->get(Craft::$app->user->identityCookie['name']);
+		$identityCookie = $this->request->getCookies()->get(Craft::$app->user->identityCookie['name']);
 		$impersonatorCookieName = Craft::$app->user->identityCookie['name'].'_impersonator';
 
 		if ($identityCookie)
 		{
-			$impersonatorCookie = Craft::createObject(array_merge($userSession->identityCookie, [
+			$this->_addIdentityCookie([
 				'name' => $impersonatorCookieName,
-				'class' => Cookie::class,
 				'value' => $identityCookie->value,
 				'expire' => $identityCookie->expire,
-			]));
-			Craft::$app->getResponse()->getCookies()->add($impersonatorCookie);
+			]);
 		}
 
-		// Proceed with the impersonation
+		/*
+		 * Proceed with the impersonation...
+		 */
 
-		if (!$userSession->loginByUserId($impersonatee->id)) {
-			$session->remove(User::IMPERSONATE_KEY);
+		$duration = ConfigHelper::durationInSeconds($settings->impersonatorSessionDuration);
+		if (!$userSession->loginByUserId($impersonatee->id, $duration))
+		{
+			Session::remove(User::IMPERSONATE_KEY);
 			Craft::$app->getResponse()->getCookies()->remove($impersonatorCookieName);
-			$session->setError(Craft::t('app', 'There was a problem impersonating this user.'));
+			$this->setFailFlash(Craft::t('app', 'There was a problem impersonating this user.'));
 			Craft::error($userSession->getIdentity()->username . ' tried to impersonate userId: ' . $impersonatee->id . ' but something went wrong.', __METHOD__);
 			return null;
 		}
 
-		$session->setNotice(Craft::t('app', 'Logged in.'));
-
-		return $this->_handleSuccess(Craft::t('app', 'Logged in.'));
+		return $this->_handleSuccessfulLogin();
 
 	}
 
 	/**
-	 * @return Response
-	 *
-	 * @throws BadRequestHttpException
-	 * @throws InvalidConfigException
+	 * Ends the current impersonation session, and attempts to restore the impersonator's original identity.
 	 */
-	public function actionUnimpersonate()
+	public function actionUnimpersonate(): Response
 	{
 
-		$request = Craft::$app->getRequest();
 		$session = Craft::$app->getSession();
 		$userSession = Craft::$app->getUser();
 
-		$impersonatorId = Impersonator::$plugin->impersonator->getImpersonatorId();
-		$impersonatorCookie = $request->getCookies()->get($userSession->identityCookie['name'].'_impersonator');
+		$impersonatorId = Impersonator::getInstance()->getImpersonatorId();
+		$impersonatorCookie = $this->request->getCookies()->get($userSession->identityCookie['name'].'_impersonator');
 
 		// Log-out the impersonated User and clean up any active impersonation session.
 		$userSession->logout(false);
@@ -138,71 +120,72 @@ class ImpersonatorController extends Controller
 		{
 
 			// Make sure we have an Impersonator ID, which means we were coming from a known impersonation session.
-			if ((bool)$impersonatorId)
+			if ($impersonatorId)
 			{
-
 				// Try to restore the original Identity.
-
-				$identityCookie = Craft::createObject(array_merge($userSession->identityCookie, [
-					'class' => Cookie::class,
+				$this->_addIdentityCookie([
 					'value' => $impersonatorCookie->value,
 					'expire' => $impersonatorCookie->expire,
-				]));
-
-				Craft::$app->getResponse()->getCookies()->add($identityCookie);
-
+				]);
 			}
 
 			// And either way, clear out the Impersonator Identity cookie.
-
 			Craft::$app->getResponse()->getCookies()->remove($impersonatorCookie);
 
 		}
 
-		return $this->_handleSuccess();
+		return $this->_handleSuccessfulLogin();
 
 	}
 
+	private function _addIdentityCookie(array $config): void
+	{
+		$config = array_merge(Craft::$app->getUser()->identityCookie, $config);
+		Craft::$app->getResponse()->getCookies()->add(new Cookie($config));
+	}
 
-	// Private Methods
-	// =========================================================================
+	/**
+	 * Ensures that the current user has permission to impersonate the given user.
+	 *
+	 * @see UsersController::_enforceImpersonatePermission()
+	 *
+	 * @param User $user
+	 * @throws ForbiddenHttpException
+	 */
+	private function _enforceImpersonatePermission(User $user): void
+	{
+		if (!Craft::$app->getUsers()->canImpersonate(static::currentUser(), $user))
+		{
+			throw new ForbiddenHttpException('You do not have sufficient permissions to impersonate this user');
+		}
+	}
 
 	/**
 	 * Redirects the user after a successful request.
 	 *
-	 * @param string $notice Whether a flash notice should be set, if this isn't an Ajax request.
-	 *
-	 * @return Response
-	 *
-	 * @throws BadRequestHttpException
+	 * @see UsersController::_handleSuccessfulLogin()
 	 */
-	private function _handleSuccess(string $notice = null): Response
+	private function _handleSuccessfulLogin(): Response
 	{
 
-		$request = Craft::$app->getRequest();
+		// Get the return URL
 		$userSession = Craft::$app->getUser();
-
-		// Get, and then clear out, the Return URL
-
 		$returnUrl = $userSession->getReturnUrl();
+
+		// Clear it out
 		$userSession->removeReturnUrl();
 
-		// If this was an Ajax request, just return a success blob.
-		if ($request->getAcceptsJson())
+		// If this was an Ajax request, just return success:true
+		if ($this->request->getAcceptsJson())
 		{
 			$return = [
-				'success' => true,
-				'returnUrl' => $returnUrl
+				'returnUrl' => $returnUrl,
 			];
-			if (Craft::$app->getConfig()->getGeneral()->enableCsrfProtection) {
-				$return['csrfTokenValue'] = $request->getCsrfToken();
+			if (Craft::$app->getConfig()->getGeneral()->enableCsrfProtection)
+			{
+				$return['csrfTokenValue'] = $this->request->getCsrfToken();
 			}
-			return $this->asJson($return);
-		}
-
-		if (!empty($notice))
-		{
-			Craft::$app->getSession()->setNotice($notice);
+			return $this->asSuccess(data: $return);
 		}
 
 		return $this->redirectToPostedUrl($userSession->getIdentity(), $returnUrl);
